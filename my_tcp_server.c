@@ -23,6 +23,13 @@ static int set_nonblocking(int fd) {
 /* ---------------- main ---------------- */
 
 int main(int argc, char *argv[]) {
+
+    typedef struct client_t {
+        int fd;
+        char rb[BUF_SIZE]; // Read Buffer
+        int rb_len;        // How much data is currently in the buffer
+    } client_t;
+
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <port>\n", argv[0]);
         exit(1);
@@ -67,11 +74,10 @@ int main(int argc, char *argv[]) {
 
     struct epoll_event ev;
     ev.events = EPOLLIN;
-    ev.data.fd = server_fd;
+    ev.data.ptr = NULL; 
     epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev);
 
     struct epoll_event events[MAX_EVENTS];
-    char buf[BUF_SIZE];
 
     printf("Server listening on port %d\n", port);
 
@@ -85,12 +91,12 @@ int main(int argc, char *argv[]) {
         }
 
         for (int i = 0; i < n; i++) {
-            int fd = events[i].data.fd;
-
+           
             /* New connections */
-            if (fd == server_fd) {
+            if (events[i].data.ptr == NULL) {
                 while (1) {
                     int client_fd = accept(server_fd, NULL, NULL);
+
                     if (client_fd < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK)
                             break;
@@ -100,41 +106,66 @@ int main(int argc, char *argv[]) {
 
                     set_nonblocking(client_fd);
 
-                    struct epoll_event cev;
+                    client_t *clt = malloc(sizeof(client_t));
+                    if(!clt){
+                        perror("malloc");
+                        close(client_fd);
+                        continue;
+                    }
+
+                    clt->fd = client_fd;
+                    clt->rb_len = 0;
+                    memset(clt->rb , 0 , BUF_SIZE);
+
+                    struct epoll_event cev;  // used to preserve data of the client
                     cev.events = EPOLLIN | EPOLLRDHUP;
                     /* EPOLLIN  : there is data to read ?
                        EPOLLRDHUP : is the clent disconnected ?
                     */
-                    cev.data.fd = client_fd;
+                    cev.data.ptr = clt; // if structure use : *ptr  | if fd use : fd 
 
                     epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &cev); // epoll start watching this fd
                 }
             }
             /* Client socket */
             else {
+                struct client_t *clt = events[i].data.ptr;
+
                 if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
-                    close(fd);
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, clt->fd, NULL);
+                    close(clt->fd);
+                    printf("client disconnected FD(%d)\n", clt->fd);
+                    free(clt);
                     continue;
                 }
 
                 /* Read all available data */
                 while (1) {
-                    ssize_t r = recv(fd, buf, sizeof(buf), 0);
+                    int currLen = clt->rb_len; // Bookmark old position
+                    ssize_t r = recv(clt->fd, clt->rb + clt->rb_len, sizeof(clt->rb) - clt->rb_len - 1, 0);
+                    
                     if (r > 0) {
-                        /* Echo back */
-                        buf[r] = '\0';
-                        send(fd, buf, r, 0);
-                        printf("clent says FD(%d): %s \n",fd ,buf);
+                        clt->rb_len += r;
+                        clt->rb[clt->rb_len] = '\0';
+
+                        // echo everything (full history) to the client
+                        send(clt->fd, clt->rb, clt->rb_len, 0);
+                        
+                        // print only the new chunk to the server log
+                        printf("client says FD(%d) : %s \n", clt->fd, clt->rb + currLen);
                     } else if (r == 0) {
-                        close(fd);
+                        printf("client disconnected(r == 0) FD(%d)\n", clt->fd);
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, clt->fd, NULL);
+                        close(clt->fd);
+                        free(clt);
                         break;
                     } else {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK){
-                             // printf("errno == EAGAIN || errno == EWOULDBLOCK \n");
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
                             break;
-                        }
                             
-                        close(fd);
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, clt->fd, NULL);
+                        close(clt->fd);
+                        free(clt);
                         break;
                     }
                 }
