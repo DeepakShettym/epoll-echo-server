@@ -20,6 +20,16 @@ static int set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+typedef struct {
+  char key[64];
+  char value[64];  
+}entry_t;
+
+entry_t database[100];
+int db_count = 0;
+
+
+
 /* ---------------- main ---------------- */
 
 int main(int argc, char *argv[]) {
@@ -141,18 +151,42 @@ int main(int argc, char *argv[]) {
 
                 /* Read all available data */
                 while (1) {
-                    int currLen = clt->rb_len; // Bookmark old position
                     ssize_t r = recv(clt->fd, clt->rb + clt->rb_len, sizeof(clt->rb) - clt->rb_len - 1, 0);
                     
                     if (r > 0) {
                         clt->rb_len += r;
                         clt->rb[clt->rb_len] = '\0';
 
-                        // echo everything (full history) to the client
-                        send(clt->fd, clt->rb, clt->rb_len, 0);
-                        
-                        // print only the new chunk to the server log
-                        printf("client says FD(%d) : %s \n", clt->fd, clt->rb + currLen);
+                        if(clt->rb_len > 0 &&  clt->rb[clt->rb_len - 1]  == '\n'){
+                            
+                            char cmd[64] , key[64] , value[64];
+                            int matches = sscanf(clt->rb , "%s %s %s",cmd , key, value);
+
+                            if(matches < 2){
+                                send(clt->fd , "ERROR: Usage SET <key> <val> or GET <key>\n" , 42,0);
+                            }else if(strcasecmp(cmd , "SET") == 0 && matches == 3){
+                                strncpy(database[db_count].key , key , 64);
+                                strncpy(database[db_count].value , value,64);
+                                db_count +=1;
+                                send(clt->fd , "OK\n",3,0);
+                                printf("stored %s : %s \n" , key , value);
+                            }else if(strcasecmp(cmd , "GET") == 0){
+                                int found = 0;
+                                for(int i = 0 ; i < db_count ; i++){
+                                    if(strcasecmp(key , database[i].key) == 0){
+                                        send(clt->fd , database[i].value , strlen(database[i].value),0);
+                                        send(clt->fd, "\n", 1, 0);
+                                        found = 1;
+                                        break;
+                                    }
+                                }
+
+                                if(!found) send(clt->fd , "Key not found \n" , 15 , 0);  
+                               
+                            }
+                            clt->rb_len = 0;
+                            memset(clt->rb, 0, BUF_SIZE);
+                        }
                     } else if (r == 0) {
                         printf("client disconnected(r == 0) FD(%d)\n", clt->fd);
                         epoll_ctl(epfd, EPOLL_CTL_DEL, clt->fd, NULL);
