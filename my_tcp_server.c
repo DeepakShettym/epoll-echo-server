@@ -186,7 +186,10 @@ int main(int argc, char *argv[]) {
                                         send(clt->fd , "dbisfull\n",8,0);
                                     }
                                 }else if(idx > -1){
-                                    send(clt->fd , "key already present \n",21,0);
+                                strncpy(database[idx].value , value ,64);
+                                send(clt->fd , "OK\n",3,0);
+                                }else{
+
                                 }
                             }else if(strcasecmp(cmd , "GET") == 0){
                                 int found = 0;
