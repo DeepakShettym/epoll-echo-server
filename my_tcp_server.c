@@ -142,6 +142,7 @@ int main(int argc, char *argv[]) {
                 struct client_t *clt = events[i].data.ptr;
 
                 if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+disconnect_client:
                     epoll_ctl(epfd, EPOLL_CTL_DEL, clt->fd, NULL);
                     close(clt->fd);
                     printf("client disconnected FD(%d)\n", clt->fd);
@@ -160,7 +161,8 @@ int main(int argc, char *argv[]) {
                         if(clt->rb_len > 0 &&  clt->rb[clt->rb_len - 1]  == '\n'){
 
                             char cmd[64] , key[64] , value[64];
-                            int matches = sscanf(clt->rb , "%s %s %s",cmd , key, value);
+                            // Fine-tuning: Added %63s to prevent buffer overflow
+                            int matches = sscanf(clt->rb , "%63s %63s %63s",cmd , key, value);
 
                             if(matches < 2){
                                 send(clt->fd , "ERROR: Usage SET <key> <val> or GET <key>\n" , 42,0);
@@ -177,19 +179,19 @@ int main(int argc, char *argv[]) {
 
                                 if(idx == -1){
                                     if(db_count < 100){
-                                        strncpy(database[db_count].key , key , 64);
-                                        strncpy(database[db_count].value , value,64);
+                                        strncpy(database[db_count].key , key , 63);
+                                        strncpy(database[db_count].value , value, 63);
                                         send(clt->fd , "OK\n",3,0);
                                         db_count++;
                                         printf("stored %s : %s \n" , key , value);
                                     }else{
-                                        send(clt->fd , "dbisfull\n",8,0);
+                                        send(clt->fd , "dbisfull\n",9,0);
                                     }
                                 }else if(idx > -1){
-                                strncpy(database[idx].value , value ,64);
-                                send(clt->fd , "OK\n",3,0);
-                                }else{
-
+                                    // Fine-tuning: Update existing entry safely
+                                    strncpy(database[idx].value , value ,63);
+                                    send(clt->fd , "OK\n",3,0);
+                                    printf("updated %s : %s \n" , key , value);
                                 }
                             }else if(strcasecmp(cmd , "GET") == 0){
                                 int found = 0;
@@ -209,19 +211,11 @@ int main(int argc, char *argv[]) {
                             memset(clt->rb, 0, BUF_SIZE);
                         }
                     } else if (r == 0) {
-                        printf("client disconnected(r == 0) FD(%d)\n", clt->fd);
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, clt->fd, NULL);
-                        close(clt->fd);
-                        free(clt);
-                        break;
+                        goto disconnect_client;
                     } else {
                         if (errno == EAGAIN || errno == EWOULDBLOCK)
                             break;
-                            
-                        epoll_ctl(epfd, EPOLL_CTL_DEL, clt->fd, NULL);
-                        close(clt->fd);
-                        free(clt);
-                        break;
+                        goto disconnect_client;
                     }
                 }
             }
