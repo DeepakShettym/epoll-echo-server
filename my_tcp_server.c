@@ -158,18 +158,36 @@ int main(int argc, char *argv[]) {
                         clt->rb[clt->rb_len] = '\0';
 
                         if(clt->rb_len > 0 &&  clt->rb[clt->rb_len - 1]  == '\n'){
-                            
+
                             char cmd[64] , key[64] , value[64];
                             int matches = sscanf(clt->rb , "%s %s %s",cmd , key, value);
 
                             if(matches < 2){
                                 send(clt->fd , "ERROR: Usage SET <key> <val> or GET <key>\n" , 42,0);
                             }else if(strcasecmp(cmd , "SET") == 0 && matches == 3){
-                                strncpy(database[db_count].key , key , 64);
-                                strncpy(database[db_count].value , value,64);
-                                db_count +=1;
-                                send(clt->fd , "OK\n",3,0);
-                                printf("stored %s : %s \n" , key , value);
+
+                                int idx = -1;
+
+                                for(int j = 0 ; j < db_count ; j++){
+                                    if(strcasecmp(database[j].key , key) == 0){
+                                        idx = j;
+                                        break;
+                                    }
+                                }
+
+                                if(idx == -1){
+                                    if(db_count < 100){
+                                        strncpy(database[db_count].key , key , 64);
+                                        strncpy(database[db_count].value , value,64);
+                                        send(clt->fd , "OK\n",3,0);
+                                        db_count++;
+                                        printf("stored %s : %s \n" , key , value);
+                                    }else{
+                                        send(clt->fd , "dbisfull\n",8,0);
+                                    }
+                                }else if(idx > -1){
+                                    send(clt->fd , "key already present \n",21,0);
+                                }
                             }else if(strcasecmp(cmd , "GET") == 0){
                                 int found = 0;
                                 for(int i = 0 ; i < db_count ; i++){
