@@ -28,11 +28,9 @@ typedef struct {
 entry_t database[100];
 int db_count = 0;
 
-/* ---------------- main ---------------- */
 
-int main(int argc, char *argv[]) {
 
-    typedef struct client_t {
+ typedef struct client_t {
         int fd;
         char rb[BUF_SIZE]; // Read Buffer
         int rb_len;        // How much data is currently in the buffer
@@ -41,6 +39,30 @@ int main(int argc, char *argv[]) {
         int wb_len;        // total data to send
         int wb_sent;       // already sent
     } client_t;
+
+
+/* ---- WRITE BUFFER QUEUE ---- */
+static void queue_write(client_t *clt, int epfd, const char *data, int len)
+{
+
+    if (len > BUF_SIZE - clt->wb_len)
+        return; // simple overflow protection
+
+    memcpy(clt->wb + clt->wb_len, data, len);
+    clt->wb_len += len;
+
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+    ev.data.ptr = clt;
+
+    epoll_ctl(epfd, EPOLL_CTL_MOD, clt->fd, &ev);
+}
+
+/* ---------------- main ---------------- */
+
+int main(int argc, char *argv[]) {
+
+   
 
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <port>\n", argv[0]);
@@ -155,6 +177,39 @@ disconnect_client:
                     continue;
                 }
 
+                /* ---- WRITE HANDLING ---- */
+                if (events[i].events & EPOLLOUT) {
+
+                    while (clt->wb_sent < clt->wb_len) {
+
+                        ssize_t s = send(clt->fd,
+                                         clt->wb + clt->wb_sent,
+                                         clt->wb_len - clt->wb_sent,
+                                         0);
+
+                        if (s > 0) {
+                            clt->wb_sent += s;
+                        }
+                        else if (s < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                            break;
+                        }
+                        else {
+                            goto disconnect_client;
+                        }
+                    }
+
+                    if (clt->wb_sent == clt->wb_len) {
+                        clt->wb_len = 0;
+                        clt->wb_sent = 0;
+
+                        struct epoll_event ev;
+                        ev.events = EPOLLIN | EPOLLRDHUP;
+                        ev.data.ptr = clt;
+
+                        epoll_ctl(epfd, EPOLL_CTL_MOD, clt->fd, &ev);
+                    }
+                }
+
                 /* Read all available data */
                 while (1) {
                     ssize_t r = recv(clt->fd, clt->rb + clt->rb_len,
@@ -200,7 +255,7 @@ disconnect_client:
                             if(strcasecmp(cmd , "SET") == 0){
 
                                 if (!value) {
-                                    send(clt->fd, "ERROR SET needs value\n", 23, 0);
+                                    queue_write(clt, epfd, "ERROR SET needs value\n", 23);
                                     goto shift_buffer;
                                 }
 
@@ -221,17 +276,17 @@ disconnect_client:
                                         strncpy(database[db_count].value , value, 63);
                                         database[db_count].value[63] = '\0';
 
-                                        send(clt->fd , "OK\n",3,0);
+                                        queue_write(clt , epfd, "OK\n",3);
                                         db_count++;
                                         printf("stored %s : %s \n" , key , value);
                                     }else{
-                                        send(clt->fd , "dbisfull\n",9,0);
+                                        queue_write(clt , epfd, "dbisfull\n",9);
                                     }
                                 }else if(idx > -1){
                                     strncpy(database[idx].value , value ,63);
                                     database[idx].value[63] = '\0';
 
-                                    send(clt->fd , "OK\n",3,0);
+                                    queue_write(clt , epfd, "OK\n",3);
                                     printf("updated %s : %s \n" , key , value);
                                 }
 
@@ -240,16 +295,16 @@ disconnect_client:
                                 int found = 0;
                                 for(int k = 0 ; k < db_count ; k++){
                                     if(strcasecmp(key , database[k].key) == 0){
-                                        send(clt->fd , database[k].value ,
-                                             strlen(database[k].value),0);
-                                        send(clt->fd, "\n", 1, 0);
+                                        queue_write(clt , epfd, database[k].value,
+                                                    strlen(database[k].value));
+                                        queue_write(clt , epfd, "\n", 1);
                                         found = 1;
                                         break;
                                     }
                                 }
 
                                 if(!found)
-                                    send(clt->fd , "Key not found \n" , 15 , 0);  
+                                    queue_write(clt , epfd, "Key not found \n" , 15);  
                             }
 
 shift_buffer:
