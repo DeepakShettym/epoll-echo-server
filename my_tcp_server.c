@@ -28,8 +28,6 @@ typedef struct {
 entry_t database[100];
 int db_count = 0;
 
-
-
 /* ---------------- main ---------------- */
 
 int main(int argc, char *argv[]) {
@@ -38,6 +36,10 @@ int main(int argc, char *argv[]) {
         int fd;
         char rb[BUF_SIZE]; // Read Buffer
         int rb_len;        // How much data is currently in the buffer
+
+        char wb[BUF_SIZE]; // Write Buffer
+        int wb_len;        // total data to send
+        int wb_sent;       // already sent
     } client_t;
 
     if (argc != 2) {
@@ -125,7 +127,10 @@ int main(int argc, char *argv[]) {
 
                     clt->fd = client_fd;
                     clt->rb_len = 0;
-                    memset(clt->rb , 0 , BUF_SIZE);
+                    memset(clt->rb , 0 , BUF_SIZE); // OK here (not hot path)
+
+                    clt->wb_len = 0;
+                    clt->wb_sent = 0;
 
                     struct epoll_event cev;  // used to preserve data of the client
                     cev.events = EPOLLIN | EPOLLRDHUP;
@@ -152,21 +157,52 @@ disconnect_client:
 
                 /* Read all available data */
                 while (1) {
-                    ssize_t r = recv(clt->fd, clt->rb + clt->rb_len, sizeof(clt->rb) - clt->rb_len - 1, 0);
+                    ssize_t r = recv(clt->fd, clt->rb + clt->rb_len,
+                                     sizeof(clt->rb) - clt->rb_len - 1, 0);
                     
                     if (r > 0) {
                         clt->rb_len += r;
                         clt->rb[clt->rb_len] = '\0';
 
-                        if(clt->rb_len > 0 &&  clt->rb[clt->rb_len - 1]  == '\n'){
+                        /* ---- MULTI COMMAND PARSING LOOP ---- */
+                        while (1) {
 
-                            char cmd[64] , key[64] , value[64];
-                            // Fine-tuning: Added %63s to prevent buffer overflow
-                            int matches = sscanf(clt->rb , "%63s %63s %63s",cmd , key, value);
+                            char *newline = memchr(clt->rb, '\n', clt->rb_len);
+                            if (!newline) break; // No full command yet
 
-                            if(matches < 2){
-                                send(clt->fd , "ERROR: Usage SET <key> <val> or GET <key>\n" , 42,0);
-                            }else if(strcasecmp(cmd , "SET") == 0 && matches == 3){
+                            *newline = '\0';
+
+                            /* ---- parsing ---- */
+
+                            char *cmd = clt->rb;
+
+                            char *space1 = clt->rb;
+                            while (*space1 != ' ' && *space1 != '\0') space1++;
+
+                            if (*space1 == '\0') goto shift_buffer; // incomplete command
+
+                            *space1 = '\0';
+
+                            char *key = space1 + 1;
+
+                            char *space2 = key;
+                            while (*space2 != ' ' && *space2 != '\0') space2++;
+
+                            char *value = NULL;
+
+                            if (*space2 == ' ') {
+                                *space2 = '\0';
+                                value = space2 + 1;
+                            }
+
+                            /* ---- command handling ---- */
+
+                            if(strcasecmp(cmd , "SET") == 0){
+
+                                if (!value) {
+                                    send(clt->fd, "ERROR SET needs value\n", 23, 0);
+                                    goto shift_buffer;
+                                }
 
                                 int idx = -1;
 
@@ -180,7 +216,11 @@ disconnect_client:
                                 if(idx == -1){
                                     if(db_count < 100){
                                         strncpy(database[db_count].key , key , 63);
+                                        database[db_count].key[63] = '\0';
+
                                         strncpy(database[db_count].value , value, 63);
+                                        database[db_count].value[63] = '\0';
+
                                         send(clt->fd , "OK\n",3,0);
                                         db_count++;
                                         printf("stored %s : %s \n" , key , value);
@@ -188,31 +228,42 @@ disconnect_client:
                                         send(clt->fd , "dbisfull\n",9,0);
                                     }
                                 }else if(idx > -1){
-                                    // Fine-tuning: Update existing entry safely
                                     strncpy(database[idx].value , value ,63);
+                                    database[idx].value[63] = '\0';
+
                                     send(clt->fd , "OK\n",3,0);
                                     printf("updated %s : %s \n" , key , value);
                                 }
+
                             }else if(strcasecmp(cmd , "GET") == 0){
+
                                 int found = 0;
-                                for(int i = 0 ; i < db_count ; i++){
-                                    if(strcasecmp(key , database[i].key) == 0){
-                                        send(clt->fd , database[i].value , strlen(database[i].value),0);
+                                for(int k = 0 ; k < db_count ; k++){
+                                    if(strcasecmp(key , database[k].key) == 0){
+                                        send(clt->fd , database[k].value ,
+                                             strlen(database[k].value),0);
                                         send(clt->fd, "\n", 1, 0);
                                         found = 1;
                                         break;
                                     }
                                 }
 
-                                if(!found) send(clt->fd , "Key not found \n" , 15 , 0);  
-                               
+                                if(!found)
+                                    send(clt->fd , "Key not found \n" , 15 , 0);  
                             }
-                            clt->rb_len = 0;
-                            memset(clt->rb, 0, BUF_SIZE);
+
+shift_buffer:
+                            /* ---- SHIFT BUFFER LEFT ---- */
+                            int consumed = (newline - clt->rb) + 1;
+                            memmove(clt->rb, clt->rb + consumed, clt->rb_len - consumed);
+                            clt->rb_len -= consumed;
+                            clt->rb[clt->rb_len] = '\0';
                         }
-                    } else if (r == 0) {
+                    }
+                    else if (r == 0) {
                         goto disconnect_client;
-                    } else {
+                    }
+                    else {
                         if (errno == EAGAIN || errno == EWOULDBLOCK)
                             break;
                         goto disconnect_client;
