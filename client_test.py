@@ -5,8 +5,8 @@ import time
 # Server configuration
 HOST = '127.0.0.1'
 PORT = 8080
-NUM_CLIENTS = 10002
-MESSAGE = b"Hello from client!"
+NUM_CLIENTS = 5
+MESSAGE = b"yo whats app!"
 
 def simulate_client(client_id):
     try:
