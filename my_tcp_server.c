@@ -12,6 +12,10 @@
 
 #define MAX_EVENTS 1024
 #define BUF_SIZE   4096
+#define HASH_SIZE  1024
+
+
+
 
 /* ---------------- utility ---------------- */
 
@@ -58,11 +62,95 @@ static void queue_write(client_t *clt, int epfd, const char *data, int len)
     epoll_ctl(epfd, EPOLL_CTL_MOD, clt->fd, &ev);
 }
 
+/*Hash table*/
+
+typedef struct kv_node{
+    char key[64];
+    char value[64];
+
+    struct kv_node* next;
+}kv_node;
+
+ kv_node *hash_table[HASH_SIZE];
+
+ static unsigned int hash_key(const char *key)
+{
+    unsigned int hash = 5381;
+
+    while (*key)
+        hash = ((hash << 5) + hash) + *key++;
+
+    return hash % HASH_SIZE;
+}
+
+void kv_set(const char *key, const char *value)
+{
+    unsigned int idx = hash_key(key);
+
+    kv_node *node = hash_table[idx];
+    while(node){
+    if(strcasecmp(node->key , key) == 0){   // find the key if already exist
+        strncpy(node->value , value,63);
+        node->value[63] = '\0';
+        return;
+    }   
+
+    node = node->next; // check until null 
+    }
+
+    // not found  ? create a new node 
+    kv_node *new_node = malloc(sizeof(kv_node)); 
+    strncpy(new_node->key, key, 63);
+    new_node->key[63] = '\0';
+
+    strncpy(new_node->value , value,63);
+    new_node->value[63] = '\0';
+
+    new_node->next = hash_table[idx]; // if new then hash_table[idx] return null |key|value|null|
+    hash_table[idx] = new_node;
+
+}
+const char *kv_get(const char *key)
+{
+    unsigned int idx  = hash_key(key);
+
+    kv_node *node = hash_table[idx];
+
+    while(node){
+
+        if(strcasecmp(key , node->key) == 0){
+            return node->value;
+        }
+        node = node->next;
+    }
+
+    return NULL;
+}
+
+void kv_delete(const char *key){
+    unsigned int idx  = hash_key(key);
+    kv_node *node = hash_table[idx];
+    kv_node *prev = NULL;
+ 
+    while(node){
+        if(strcasecmp(key , node->key) == 0){
+            if(prev) prev->next = node->next;
+            else hash_table[idx] = node->next;
+            free(node);
+            return;
+        }
+
+        prev = node;
+        node = node->next;
+    }
+
+}
+
+
+
 /* ---------------- main ---------------- */
 
 int main(int argc, char *argv[]) {
-
-   
 
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <port>\n", argv[0]);
@@ -253,59 +341,26 @@ disconnect_client:
                             /* ---- command handling ---- */
 
                             if(strcasecmp(cmd , "SET") == 0){
-
-                                if (!value) {
-                                    queue_write(clt, epfd, "ERROR SET needs value\n", 23);
-                                    goto shift_buffer;
-                                }
-
-                                int idx = -1;
-
-                                for(int j = 0 ; j < db_count ; j++){
-                                    if(strcasecmp(database[j].key , key) == 0){
-                                        idx = j;
-                                        break;
-                                    }
-                                }
-
-                                if(idx == -1){
-                                    if(db_count < 100){
-                                        strncpy(database[db_count].key , key , 63);
-                                        database[db_count].key[63] = '\0';
-
-                                        strncpy(database[db_count].value , value, 63);
-                                        database[db_count].value[63] = '\0';
-
-                                        queue_write(clt , epfd, "OK\n",3);
-                                        db_count++;
-                                        printf("stored %s : %s \n" , key , value);
-                                    }else{
-                                        queue_write(clt , epfd, "dbisfull\n",9);
-                                    }
-                                }else if(idx > -1){
-                                    strncpy(database[idx].value , value ,63);
-                                    database[idx].value[63] = '\0';
-
-                                    queue_write(clt , epfd, "OK\n",3);
-                                    printf("updated %s : %s \n" , key , value);
+                                if (key && value) {
+                                    kv_set(key , value);
+                                    queue_write(clt , epfd , "OK\n" , 3);
+                                } else {
+                                        queue_write(clt, epfd, "ERROR: SET needs key and value\n", 31);
                                 }
 
                             }else if(strcasecmp(cmd , "GET") == 0){
+                                const char *val = kv_get(key);
 
-                                int found = 0;
-                                for(int k = 0 ; k < db_count ; k++){
-                                    if(strcasecmp(key , database[k].key) == 0){
-                                        queue_write(clt , epfd, database[k].value,
-                                                    strlen(database[k].value));
-                                        queue_write(clt , epfd, "\n", 1);
-                                        found = 1;
-                                        break;
-                                    }
+                                if(val){
+                                    queue_write(clt , epfd , val , strlen(val));
+                                    queue_write(clt, epfd, "\n", 1);
+                                } else {
+                                    queue_write(clt, epfd, "Key not found\n", 14);
                                 }
-
-                                if(!found)
-                                    queue_write(clt , epfd, "Key not found \n" , 15);  
-                            }
+                            }else if (strcasecmp(cmd, "DEL") == 0) { // <--- ADD THIS
+                                    kv_delete(key);
+                                    queue_write(clt, epfd, "DELETED\n", 8);
+                                }
 
 shift_buffer:
                             /* ---- SHIFT BUFFER LEFT ---- */
