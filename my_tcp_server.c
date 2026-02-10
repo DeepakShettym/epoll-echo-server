@@ -40,15 +40,13 @@ typedef struct client_t {
 } client_t;
 
 /* ---- WRITE BUFFER QUEUE ---- */
-static void queue_write(client_t *clt, int epfd, const char *data, int len)
+/* ---- WRITE BUFFER QUEUE ---- */
+static int queue_write(client_t *clt, int epfd, const char *data, int len)
 {
     /* FIX: prevent silent overflow drop */
     if (len > BUF_SIZE - clt->wb_len) {
-        /* disconnect instead of silent corruption */
-        epoll_ctl(epfd, EPOLL_CTL_DEL, clt->fd, NULL);
-        close(clt->fd);
-        free(clt);
-        return;
+        /* FIX: signal caller to disconnect safely */
+        return -1;
     }
 
     memcpy(clt->wb + clt->wb_len, data, len);
@@ -59,7 +57,10 @@ static void queue_write(client_t *clt, int epfd, const char *data, int len)
     ev.data.ptr = clt;
 
     epoll_ctl(epfd, EPOLL_CTL_MOD, clt->fd, &ev);
+
+    return 0;
 }
+
 
 /*Hash table*/
 
@@ -347,7 +348,8 @@ disconnect_client:
 
                             /* FIX: malformed command detection */
                             if (*space1 == '\0') {
-                                queue_write(clt, epfd, "ERROR malformed\n", 16);
+                                if (queue_write(clt, epfd, "ERROR malformed\n", 16) < 0)
+                                    goto disconnect_client;
                                 goto shift_buffer;
                             }
 
@@ -370,25 +372,31 @@ disconnect_client:
                             if(strcasecmp(cmd , "SET") == 0){
                                 if (key && value &&
                                     strlen(key) < 64 &&
-                                    strlen(value) < 64) {
+                                    strlen(value) < 64 && strlen(key) > 0 && strlen(value) > 0) {
                                     kv_set(key , value);
-                                    queue_write(clt , epfd , "OK\n" , 3);
+                                    if (queue_write(clt , epfd , "OK\n" , 3) < 0)
+                                        goto disconnect_client;
                                 } else {
-                                    queue_write(clt, epfd, "ERROR: SET needs key and value\n", 31);
+                                    if (queue_write(clt, epfd, "ERROR: SET needs key and value\n", 31) < 0)
+                                        goto disconnect_client;
                                 }
 
                             }else if(strcasecmp(cmd , "GET") == 0){
                                 const char *val = kv_get(key);
 
                                 if(val){
-                                    queue_write(clt , epfd , val , strlen(val));
-                                    queue_write(clt, epfd, "\n", 1);
+                                    if (queue_write(clt , epfd , val , strlen(val)) < 0)
+                                        goto disconnect_client;
+                                    if (queue_write(clt, epfd, "\n", 1) < 0)
+                                        goto disconnect_client;
                                 } else {
-                                    queue_write(clt, epfd, "Key not found\n", 14);
+                                    if (queue_write(clt, epfd, "Key not found\n", 14) < 0)
+                                        goto disconnect_client;
                                 }
                             }else if (strcasecmp(cmd, "DEL") == 0) {
                                 kv_delete(key);
-                                queue_write(clt, epfd, "DELETED\n", 8);
+                                if (queue_write(clt, epfd, "DELETED\n", 8) < 0)
+                                    goto disconnect_client;
                             }
 
 shift_buffer:
