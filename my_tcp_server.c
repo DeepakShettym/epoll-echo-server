@@ -14,9 +14,6 @@
 #define BUF_SIZE   4096
 #define HASH_SIZE  1024
 
-
-
-
 /* ---------------- utility ---------------- */
 
 static int set_nonblocking(int fd) {
@@ -32,25 +29,27 @@ typedef struct {
 entry_t database[100];
 int db_count = 0;
 
+typedef struct client_t {
+    int fd;
+    char rb[BUF_SIZE]; // Read Buffer
+    int rb_len;        // How much data is currently in the buffer
 
-
- typedef struct client_t {
-        int fd;
-        char rb[BUF_SIZE]; // Read Buffer
-        int rb_len;        // How much data is currently in the buffer
-
-        char wb[BUF_SIZE]; // Write Buffer
-        int wb_len;        // total data to send
-        int wb_sent;       // already sent
-    } client_t;
-
+    char wb[BUF_SIZE]; // Write Buffer
+    int wb_len;        // total data to send
+    int wb_sent;       // already sent
+} client_t;
 
 /* ---- WRITE BUFFER QUEUE ---- */
 static void queue_write(client_t *clt, int epfd, const char *data, int len)
 {
-
-    if (len > BUF_SIZE - clt->wb_len)
-        return; // simple overflow protection
+    /* FIX: prevent silent overflow drop */
+    if (len > BUF_SIZE - clt->wb_len) {
+        /* disconnect instead of silent corruption */
+        epoll_ctl(epfd, EPOLL_CTL_DEL, clt->fd, NULL);
+        close(clt->fd);
+        free(clt);
+        return;
+    }
 
     memcpy(clt->wb + clt->wb_len, data, len);
     clt->wb_len += len;
@@ -71,9 +70,14 @@ typedef struct kv_node{
     struct kv_node* next;
 }kv_node;
 
- kv_node *hash_table[HASH_SIZE];
+kv_node *hash_table[HASH_SIZE];
 
- static unsigned int hash_key(const char *key)
+/* FIX: explicit init safety */
+static void kv_init() {
+    memset(hash_table, 0, sizeof(hash_table));
+}
+
+static unsigned int hash_key(const char *key)
 {
     unsigned int hash = 5381;
 
@@ -85,21 +89,29 @@ typedef struct kv_node{
 
 void kv_set(const char *key, const char *value)
 {
+    /* FIX: bounds validation */
+    if (!key || !value) return;
+    if (strlen(key) >= 64 || strlen(value) >= 64) return;
+
     unsigned int idx = hash_key(key);
 
     kv_node *node = hash_table[idx];
     while(node){
-    if(strcasecmp(node->key , key) == 0){   // find the key if already exist
-        strncpy(node->value , value,63);
-        node->value[63] = '\0';
-        return;
-    }   
+        if(strcasecmp(node->key , key) == 0){   // find the key if already exist
+            strncpy(node->value , value,63);
+            node->value[63] = '\0';
+            return;
+        }   
 
-    node = node->next; // check until null 
+        node = node->next; // check until null 
     }
 
     // not found  ? create a new node 
     kv_node *new_node = malloc(sizeof(kv_node)); 
+
+    /* FIX: malloc check */
+    if(!new_node) return;
+
     strncpy(new_node->key, key, 63);
     new_node->key[63] = '\0';
 
@@ -108,8 +120,8 @@ void kv_set(const char *key, const char *value)
 
     new_node->next = hash_table[idx]; // if new then hash_table[idx] return null |key|value|null|
     hash_table[idx] = new_node;
-
 }
+
 const char *kv_get(const char *key)
 {
     unsigned int idx  = hash_key(key);
@@ -143,14 +155,25 @@ void kv_delete(const char *key){
         prev = node;
         node = node->next;
     }
-
 }
 
-
+/* FIX: cleanup helper */
+void kv_free_all(){
+    for(int i=0;i<HASH_SIZE;i++){
+        kv_node *n = hash_table[i];
+        while(n){
+            kv_node *tmp = n;
+            n = n->next;
+            free(tmp);
+        }
+    }
+}
 
 /* ---------------- main ---------------- */
 
 int main(int argc, char *argv[]) {
+
+    kv_init(); /* FIX: ensure table clean */
 
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <port>\n", argv[0]);
@@ -322,7 +345,11 @@ disconnect_client:
                             char *space1 = clt->rb;
                             while (*space1 != ' ' && *space1 != '\0') space1++;
 
-                            if (*space1 == '\0') goto shift_buffer; // incomplete command
+                            /* FIX: malformed command detection */
+                            if (*space1 == '\0') {
+                                queue_write(clt, epfd, "ERROR malformed\n", 16);
+                                goto shift_buffer;
+                            }
 
                             *space1 = '\0';
 
@@ -341,11 +368,13 @@ disconnect_client:
                             /* ---- command handling ---- */
 
                             if(strcasecmp(cmd , "SET") == 0){
-                                if (key && value) {
+                                if (key && value &&
+                                    strlen(key) < 64 &&
+                                    strlen(value) < 64) {
                                     kv_set(key , value);
                                     queue_write(clt , epfd , "OK\n" , 3);
                                 } else {
-                                        queue_write(clt, epfd, "ERROR: SET needs key and value\n", 31);
+                                    queue_write(clt, epfd, "ERROR: SET needs key and value\n", 31);
                                 }
 
                             }else if(strcasecmp(cmd , "GET") == 0){
@@ -357,10 +386,10 @@ disconnect_client:
                                 } else {
                                     queue_write(clt, epfd, "Key not found\n", 14);
                                 }
-                            }else if (strcasecmp(cmd, "DEL") == 0) { // <--- ADD THIS
-                                    kv_delete(key);
-                                    queue_write(clt, epfd, "DELETED\n", 8);
-                                }
+                            }else if (strcasecmp(cmd, "DEL") == 0) {
+                                kv_delete(key);
+                                queue_write(clt, epfd, "DELETED\n", 8);
+                            }
 
 shift_buffer:
                             /* ---- SHIFT BUFFER LEFT ---- */
@@ -383,6 +412,7 @@ shift_buffer:
         }
     }
 
+    kv_free_all();
     close(server_fd);
     close(epfd);
     return 0;
