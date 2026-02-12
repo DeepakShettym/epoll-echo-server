@@ -46,7 +46,6 @@ DEL key
 
 Each command must end with:
 
-\n
 
 Example:
 
