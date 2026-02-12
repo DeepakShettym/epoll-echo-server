@@ -67,8 +67,9 @@ SET token abc123 EX 5
 
 ## 🛠 Compilation
 
-```bash
 gcc -o my_tcp_server main.c
+
+---
 
 ## ▶️ Run
 
@@ -76,9 +77,13 @@ gcc -o my_tcp_server main.c
 
  or run client_test.py (check if updated to latest) 
 
+ ---
+
 ## 🔌 Connect (netcat)
 
 nc localhost 8080
+
+---
 
 ## ✅ Sample Output 
 
@@ -122,6 +127,8 @@ DELETED
 get name
 
 Key not found
+
+
 
 
 
