@@ -9,10 +9,12 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <netinet/in.h>
+#include <time.h>
 
 #define MAX_EVENTS 1024
 #define BUF_SIZE   4096
 #define HASH_SIZE  1024
+#define MAX_KV     3   // ✅ capacity limit
 
 /* ---------------- utility ---------------- */
 
@@ -29,6 +31,7 @@ typedef struct {
 entry_t database[100];
 int db_count = 0;
 
+
 typedef struct client_t {
     int fd;
     char rb[BUF_SIZE]; // Read Buffer
@@ -39,7 +42,7 @@ typedef struct client_t {
     int wb_sent;       // already sent
 } client_t;
 
-/* ---- WRITE BUFFER QUEUE ---- */
+
 /* ---- WRITE BUFFER QUEUE ---- */
 static int queue_write(client_t *clt, int epfd, const char *data, int len)
 {
@@ -61,22 +64,77 @@ static int queue_write(client_t *clt, int epfd, const char *data, int len)
     return 0;
 }
 
+static long long now_sec(){
+    return time(NULL);
+}
 
 /*Hash table*/
 
 typedef struct kv_node{
     char key[64];
     char value[64];
-
+    long long expiry;   // TTL support
     struct kv_node* next;
+
+    struct kv_node *lru_prev;   // ✅ LRU
+    struct kv_node *lru_next;   // ✅ LRU
 }kv_node;
 
 kv_node *hash_table[HASH_SIZE];
 
+int kv_count = 0;
+int current_hash_size = HASH_SIZE;
+
+/* ✅ LRU HEAD/TAIL */
+kv_node *lru_head = NULL;
+kv_node *lru_tail = NULL;
+
 /* FIX: explicit init safety */
 static void kv_init() {
     memset(hash_table, 0, sizeof(hash_table));
+    lru_head = lru_tail = NULL;   // ✅ reset LRU
 }
+
+void kv_delete(const char *key);
+
+/* ---------------- LRU HELPERS ---------------- */
+
+static void lru_add_to_head(kv_node *node) {
+    node->lru_prev = NULL;
+    node->lru_next = lru_head;
+
+    if (lru_head)
+        lru_head->lru_prev = node;
+
+    lru_head = node;
+
+    if (!lru_tail)
+        lru_tail = node;
+}
+
+static void lru_remove(kv_node *node) {
+    if (node->lru_prev)
+        node->lru_prev->lru_next = node->lru_next;
+    else
+        lru_head = node->lru_next;
+
+    if (node->lru_next)
+        node->lru_next->lru_prev = node->lru_prev;
+    else
+        lru_tail = node->lru_prev;
+
+    node->lru_prev = node->lru_next = NULL;
+}
+
+static void lru_move_to_head(kv_node *node) {
+    if (lru_head == node)
+        return;
+
+    lru_remove(node);
+    lru_add_to_head(node);
+}
+
+/* ------------------------------------------------ */
 
 static unsigned int hash_key(const char *key)
 {
@@ -88,7 +146,7 @@ static unsigned int hash_key(const char *key)
     return hash % HASH_SIZE;
 }
 
-void kv_set(const char *key, const char *value)
+void kv_set(const char *key, const char *value, int ttl)
 {
     /* FIX: bounds validation */
     if (!key || !value) return;
@@ -101,6 +159,10 @@ void kv_set(const char *key, const char *value)
         if(strcasecmp(node->key , key) == 0){   // find the key if already exist
             strncpy(node->value , value,63);
             node->value[63] = '\0';
+            node->expiry = ttl ? now_sec() + ttl : 0;  // TTL update
+
+            /* ✅ LRU update */
+            lru_move_to_head(node);
             return;
         }   
 
@@ -119,8 +181,23 @@ void kv_set(const char *key, const char *value)
     strncpy(new_node->value , value,63);
     new_node->value[63] = '\0';
 
+    new_node->expiry = ttl ? now_sec() + ttl : 0; // TTL insert
+
     new_node->next = hash_table[idx]; // if new then hash_table[idx] return null |key|value|null|
     hash_table[idx] = new_node;
+
+    /* ✅ LRU insert */
+    lru_add_to_head(new_node);
+
+    kv_count++;
+
+    /* ✅ Eviction */
+    if (kv_count > MAX_KV) {
+        kv_node *victim = lru_tail;
+        if (victim) {
+            kv_delete(victim->key);
+        }
+    }
 }
 
 const char *kv_get(const char *key)
@@ -132,13 +209,23 @@ const char *kv_get(const char *key)
     while(node){
 
         if(strcasecmp(key , node->key) == 0){
+
+            /* TTL CHECK */
+            if(node->expiry && node->expiry < now_sec()){
+                kv_delete(key);
+                return NULL;
+            }
+
+            /* ✅ LRU update */
+            lru_move_to_head(node);
+
             return node->value;
         }
         node = node->next;
     }
 
     return NULL;
-}
+} 
 
 void kv_delete(const char *key){
     unsigned int idx  = hash_key(key);
@@ -149,7 +236,12 @@ void kv_delete(const char *key){
         if(strcasecmp(key , node->key) == 0){
             if(prev) prev->next = node->next;
             else hash_table[idx] = node->next;
+
+            /* ✅ remove from LRU */
+            lru_remove(node);
+
             free(node);
+            kv_count--;
             return;
         }
 
@@ -361,10 +453,17 @@ disconnect_client:
                             while (*space2 != ' ' && *space2 != '\0') space2++;
 
                             char *value = NULL;
+                            int ttl = 0;
 
                             if (*space2 == ' ') {
                                 *space2 = '\0';
                                 value = space2 + 1;
+
+                                char *ex = strstr(value, " EX ");
+                                if (ex) {
+                                    *ex = '\0';
+                                    ttl = atoi(ex + 4);
+                                }
                             }
 
                             /* ---- command handling ---- */
@@ -372,8 +471,12 @@ disconnect_client:
                             if(strcasecmp(cmd , "SET") == 0){
                                 if (key && value &&
                                     strlen(key) < 64 &&
-                                    strlen(value) < 64 && strlen(key) > 0 && strlen(value) > 0) {
-                                    kv_set(key , value);
+                                    strlen(value) < 64 &&
+                                    strlen(key) > 0 &&
+                                    strlen(value) > 0) {
+
+                                    kv_set(key , value, ttl);
+
                                     if (queue_write(clt , epfd , "OK\n" , 3) < 0)
                                         goto disconnect_client;
                                 } else {

@@ -1,36 +1,127 @@
-# High-Performance Epoll Echo Server
+# High-Performance Epoll Key-Value Store
 
-A lightweight, event-driven TCP echo server written in C using the Linux `epoll` API. This server handles multiple concurrent connections efficiently using non-blocking I/O and a single-threaded event loop.
+A lightweight, event-driven **in-memory key-value store** written in C using the Linux `epoll` API.  
+The server supports a custom text protocol with **SET, GET, DEL**, **TTL expiration**, and **O(1) LRU eviction**.
 
-## Features
-* **Epoll-based:** Uses Linux-specific `epoll` for scalable I/O multiplexing.
-* **Non-blocking I/O:** Utilizes `O_NONBLOCK` to ensure the server never hangs on a single slow client.
-* **Level-Triggered:** Robust event handling for incoming data and new connections.
-* **Edge-Case Handling:** Correctly manages `EAGAIN`, `EWOULDBLOCK`, and client disconnections (`EPOLLRDHUP`).
+This project demonstrates core systems programming concepts including **non-blocking sockets**,  
+**stream parsing**, **hash table design**, and **cache eviction policies**.
 
-## Requirements
-* Linux OS (Epoll is Linux-specific)
+---
+
+## 🚀 Features
+
+* **Epoll-based:** Scalable I/O multiplexing via Linux `epoll`
+* **Non-blocking I/O:** Uses `O_NONBLOCK` for responsiveness
+* **Custom Protocol:** Simple text commands (`SET`, `GET`, `DEL`)
+* **Stream Parsing:** Handles TCP packet fragmentation correctly
+* **Hash Table Storage:** O(1) average lookup
+* **TTL Support:** Key expiration using timestamps
+* **LRU Eviction:** O(1) least-recently-used removal
+* **Single-threaded Event Loop:** Efficient and predictable behavior
+
+---
+
+## 🧠 Architecture
+
+**Storage Engine**
+
+* Hash Table → Fast key lookup
+* Doubly Linked List → LRU tracking
+* Expiry Timestamp → TTL logic
+
+Each key is tracked in:
+
+1. Hash bucket (indexing)
+2. LRU list (recency ordering)
+
+---
+
+## 📡 Protocol
+
+Simple text-based protocol:
+
+SET key value [EX ttl]
+GET key
+DEL key
+
+Each command must end with:
+
+\n
+
+Example:
+
+SET name Deepak
+GET name
+DEL name
+SET token abc123 EX 5
+
+---
+
+## ⚙️ Requirements
+
+* Linux OS (epoll is Linux-specific)
 * GCC Compiler
-* Make (optional)
+* netcat / telnet for testing
 
-## Usage
+---
 
-### Compilation
+## 🛠 Compilation
+
 ```bash
-gcc -o server main.c
+gcc -o my_tcp_server main.c
+
+## ▶️ Run
+
+./my_tcp_server 8080
+
+ or run client_test.py (check if updated to latest) 
+
+## 🔌 Connect (netcat)
+
+nc localhost 8080
+
+## ✅ Sample Output 
+
+deepak@deepak-ThinkPad-E14-Gen-6:~/networking$ nc localhost 8080
+
+set name ronaldo
+
+OK
+
+set country portugal
+
+OK
+
+set club alnasar
+
+OK
+
+get name
+
+ronaldo
+
+set code suii
+
+OK
+
+get country
+
+Key not found
+
+// Since MAX_KV = 3 and we accessed "name",
+
+// it moved to the LRU head.
+
+// "country" became the LRU tail and was evicted.
 
 
-### Sample output
+del name
 
-deepak@deepak-ThinkPad-E14-Gen-6:~/networking$ ./my_tcp_server 8080
+DELETED
 
-Server listening on port 8080
-clent says FD(5): hey server ...
- 
-clent says FD(6): yo man how are u
- 
-clent says FD(7): iam iron man
- 
-clent says FD(8): iam siderman
- 
+get name
+
+Key not found
+
+
 
